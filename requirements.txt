@@ -4,5 +4,5 @@ firebase-admin
 numpy
 requests
 joblib
-pickle-mixin
+scikit-learn
 gunicorn
