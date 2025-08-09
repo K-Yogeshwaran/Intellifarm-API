@@ -1,0 +1,8 @@
+flask
+flask-cors
+firebase-admin
+numpy
+requests
+joblib
+pickle-mixin
+gunicorn
