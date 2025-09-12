@@ -331,26 +331,43 @@ def chat():
         top_entries = retrieve_similar_entries(user_prompt)
         context_text = "\n".join(top_entries) if top_entries else "No context available."
 
+        # Build messages list
         messages = [{"role": "system", "content": "You are a helpful assistant."}]
-        messages.extend(history)
+        for msg in history:
+            if "role" in msg and "content" in msg:
+                messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_prompt})
         messages.append({"role": "system", "content": f"Extra context:\n{context_text}"})
 
         payload = {"model": GROQ_MODEL, "messages": messages}
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers, json=payload, timeout=15
+            headers=headers,
+            json=payload,
+            timeout=60  # ✅ Increase timeout
         )
-        result = response.json()
 
-        if "choices" in result and result["choices"]:
+        # Check HTTP response
+        if response.status_code != 200:
+            print(f"❌ Groq API HTTP {response.status_code}: {response.text}")
+            return jsonify({"error": f"Groq API returned status {response.status_code}", "details": response.text}), 500
+
+        result = response.json()
+        if "choices" in result and len(result["choices"]) > 0:
             reply = result["choices"][0]["message"]["content"]
             save_message(uid, "assistant", reply)
             return jsonify({"response": reply, "history": load_chat_history(uid)})
-        return jsonify({"error": "No response from Groq API"}), 500
+        else:
+            print("❌ Groq API returned no choices:", result)
+            return jsonify({"error": "No response from Groq API", "details": result}), 500
+
     except Exception as e:
+        print("❌ Exception in /chat:", str(e))
         return jsonify({"error": str(e)}), 500
 
 # ---------------------------
@@ -364,3 +381,4 @@ threading.Thread(target=sync_rag_loop, daemon=True).start()
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
