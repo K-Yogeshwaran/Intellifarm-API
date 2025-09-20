@@ -17,13 +17,13 @@ from datetime import datetime
 # ---------------------------
 # FLASK & FIREBASE INIT
 # ---------------------------
-app = Flask(__name__)
+app = Flask(_name_)
 CORS(app)
 
 # ---------------------------
 # GOOGLE VERTEX AI INIT
 # ---------------------------
-sa_path = r"E:\Practice repository\INTELLIFARM\lib\intellifarm-backend.json"
+sa_path = r"D:\NEW\INTELLIFARM\lib\intellifarm-backend.json"
 
 scoped_creds = service_account.Credentials.from_service_account_file(
     sa_path,
@@ -52,6 +52,19 @@ firebase_admin.initialize_app(
 realtime_db_ref = db.reference("sensor/moisture")
 firestore_db = firestore.client()
 latest_data = {"moisture": None, "status": "Unknown", "timestamp": ""}
+
+# ---------------------------
+# STATUS TRACKING (for / route)
+# ---------------------------
+sync_status = {
+    "last_rag_sync": None,
+    "rag_entries": 0,
+    "rag_dim": 0,
+    "rag_error": None,
+    "last_moisture": None,
+    "last_moisture_status": None,
+    "last_moisture_time": None,
+}
 
 # ---------------------------
 # HELPER FUNCTIONS
@@ -91,6 +104,12 @@ def sync_data_loop():
                 "status": status,
                 "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
             })
+            # 🔄 update sync_status for / route
+            sync_status.update({
+                "last_moisture": value,
+                "last_moisture_status": status,
+                "last_moisture_time": latest_data["timestamp"],
+            })
             print(f"✅ Synced Moisture: {value} ({status})")
         except Exception as e:
             print(f"❌ Sync Error: {e}")
@@ -125,7 +144,7 @@ faiss_lock = threading.Lock()
 def build_knowledge_base_from_firestore():
     kb = []
     try:
-        # Products
+        # ---------------- Products ----------------
         products_ref = firestore_db.collection("products").stream()
         for doc in products_ref:
             data = doc.to_dict()
@@ -134,9 +153,11 @@ def build_knowledge_base_from_firestore():
             quantity = data.get("quantity", "N/A")
             price = data.get("price", "N/A")
             negotiable = "negotiable" if data.get("negotiable", False) else "fixed price"
-            kb.append(f"Farmer {farmer} offers {quantity}kg of {product} at ₹{price} per kg. Price is {negotiable}.")
+            kb.append(
+                f"Farmer {farmer} offers {quantity}kg of {product} at ₹{price} per kg. Price is {negotiable}."
+            )
 
-        # Dealer orders
+        # ---------------- Dealer Orders ----------------
         orders_ref = firestore_db.collection("dealer_orders").stream()
         for doc in orders_ref:
             data = doc.to_dict()
@@ -148,10 +169,35 @@ def build_knowledge_base_from_firestore():
             price = data.get("price", "N/A")
             status = data.get("acceptStatus", "pending")
             timestamp = data.get("timestamp", "Unknown Date")
-            kb.append(f"Dealer {dealer} placed an order for {quantity}kg of {product} ({category}) from Farmer {farmer} at ₹{price} per kg. Order status is {status}. Ordered on {timestamp}.")
+            kb.append(
+                f"Dealer {dealer} placed an order for {quantity}kg of {product} ({category}) "
+                f"from Farmer {farmer} at ₹{price} per kg. Order status is {status}. Ordered on {timestamp}."
+            )
+
+        # ---------------- Market Prices ----------------
+        prices_ref = firestore_db.collection("market_prices").stream()
+        for doc in prices_ref:
+            data = doc.to_dict()
+            commodity = data.get("commodity", "Unknown")
+            variety = data.get("variety", "Unknown")
+            district = data.get("district", "Unknown")
+            market = data.get("market", "Unknown")
+            min_price = data.get("min_price", "N/A")
+            max_price = data.get("max_price", "N/A")
+            modal_price = data.get("modal_price_per_kg", "N/A")
+            date = data.get("date", "Unknown Date")
+
+            kb.append(
+                f"In {district}, at {market}, the price of {commodity} ({variety}) "
+                f"on {date} ranged from ₹{min_price} to ₹{max_price}, "
+                f"with a modal price of ₹{modal_price} per kg."
+            )
+
     except Exception as e:
         print("❌ Error building KB from Firestore:", e)
+
     return kb
+
 
 # ---------------------------
 # Sync RAG loop
@@ -159,13 +205,29 @@ def build_knowledge_base_from_firestore():
 def sync_rag_loop(poll_interval=5):
     global faiss_index, kb_texts
     last_kb = None
+
+    def batch_embeddings(texts, batch_size=250, sleep_time=1.0):
+        """Generate embeddings in safe batches (max 250 per request)."""
+        all_embeds = []
+        for i in range(0, len(texts), batch_size):
+            chunk = texts[i:i+batch_size]
+
+            embeds_objs = embedding_model.get_embeddings(chunk)
+            all_embeds.extend([e.values for e in embeds_objs])
+
+            # Avoid 429 quota errors
+            time.sleep(sleep_time)
+
+        return np.array(all_embeds, dtype="float32")
+
     while True:
         try:
             new_kb = build_knowledge_base_from_firestore()
             if new_kb and new_kb != last_kb:
                 print("🔄 Updating FAISS index...")
-                embeds_objs = embedding_model.get_embeddings(new_kb)
-                kb_embeddings = np.array([e.values for e in embeds_objs], dtype="float32")
+
+                # ✅ Use batching to respect 250 limit
+                kb_embeddings = batch_embeddings(new_kb, batch_size=250, sleep_time=1.0)
 
                 dim = kb_embeddings.shape[1] if kb_embeddings.size else 0
                 if dim > 0:
@@ -185,10 +247,20 @@ def sync_rag_loop(poll_interval=5):
                         print("⚠ Save error:", e)
 
                     last_kb = new_kb.copy()
+                    # 🔄 update sync_status for /
+                    sync_status.update({
+                        "last_rag_sync": datetime.utcnow().isoformat(),
+                        "rag_entries": len(kb_texts),
+                        "rag_dim": dim,
+                        "rag_error": None
+                    })
                     print(f"✅ RAG index rebuilt with {len(kb_texts)} entries (dim={dim}).")
         except Exception as e:
             print("❌ Error in RAG sync loop:", e)
+            sync_status["rag_error"] = str(e)
+
         time.sleep(poll_interval)
+
 
 # ---------------------------
 # Load FAISS locally
@@ -228,7 +300,7 @@ def retrieve_similar_entries(query, top_k=3):
 # ---------------------------
 # GROQ CONFIG
 # ---------------------------
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or "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"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or "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"
 GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ---------------------------
@@ -242,7 +314,7 @@ def load_chat_history(uid):
         docs = ref.stream()
         return [{"role": d.to_dict()["role"], "content": d.to_dict()["content"]} for d in docs]
     except Exception as e:
-        print(f"⚠️ Error loading chat history for {uid}: {e}")
+        print(f"⚠ Error loading chat history for {uid}: {e}")
         return []
 
 def save_message(uid, role, content):
@@ -253,7 +325,7 @@ def save_message(uid, role, content):
             "timestamp": datetime.utcnow()
         })
     except Exception as e:
-        print(f"⚠️ Error saving message for {uid}: {e}")
+        print(f"⚠ Error saving message for {uid}: {e}")
 
 @app.route("/chat/history", methods=["POST"])
 def get_chat_history():
@@ -288,9 +360,145 @@ def init_user():
 # ---------------------------
 # FLASK ROUTES
 # ---------------------------
-@app.route("/")
+from flask import render_template_string, request
+
+@app.route("/", methods=["GET", "POST"])
 def home():
-    return jsonify({"status": "IntelliFarm API running"})
+    query = None
+    results = []
+
+    if request.method == "POST":
+        query = request.form.get("query")
+        if query:
+            results = retrieve_similar_entries(query, top_k=5)
+
+    # HTML template with search
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>IntelliFarm Dashboard</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 20px;
+                background: #f4f9f4;
+                color: #333;
+            }
+            h1 {
+                color: #2e7d32;
+            }
+            .card {
+                background: white;
+                padding: 20px;
+                margin: 15px 0;
+                border-radius: 12px;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            }
+            .card h2 {
+                margin-top: 0;
+                color: #388e3c;
+            }
+            .entry {
+                padding: 10px;
+                margin: 5px 0;
+                border-bottom: 1px solid #eee;
+            }
+            .search-box {
+                margin: 20px 0;
+            }
+            input[type=text] {
+                padding: 10px;
+                width: 70%;
+                border-radius: 8px;
+                border: 1px solid #ccc;
+                font-size: 16px;
+            }
+            button {
+                padding: 10px 20px;
+                background: #2e7d32;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 16px;
+                cursor: pointer;
+            }
+            button:hover {
+                background: #1b5e20;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>🌱 IntelliFarm Dashboard</h1>
+
+        <div class="card">
+            <h2>Soil Moisture</h2>
+            <p><b>Value:</b> {{ moisture.value }}</p>
+            <p><b>Status:</b> {{ moisture.status }}</p>
+            <p><b>Timestamp:</b> {{ moisture.timestamp }}</p>
+        </div>
+
+        <div class="card">
+            <h2>RAG Status</h2>
+            <p><b>Last Sync:</b> {{ rag.last_sync }}</p>
+            <p><b>Entries:</b> {{ rag.entries }}</p>
+            <p><b>Dimension:</b> {{ rag.dimension }}</p>
+            <p><b>Error:</b> {{ rag.error }}</p>
+        </div>
+
+        <div class="card">
+            <h2>Knowledge Base Entries (Vectorized)</h2>
+            {% if kb_texts %}
+                {% for entry in kb_texts %}
+                    <div class="entry">{{ loop.index }}. {{ entry }}</div>
+                {% endfor %}
+            {% else %}
+                <p>No entries found.</p>
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <h2>🔍 Search Knowledge Base</h2>
+            <form method="POST">
+                <div class="search-box">
+                    <input type="text" name="query" placeholder="Ask something..." value="{{ query or '' }}">
+                    <button type="submit">Search</button>
+                </div>
+            </form>
+
+            {% if query %}
+                <h3>Results for "{{ query }}":</h3>
+                {% if results %}
+                    {% for res in results %}
+                        <div class="entry">{{ loop.index }}. {{ res }}</div>
+                    {% endfor %}
+                {% else %}
+                    <p>No relevant results found.</p>
+                {% endif %}
+            {% endif %}
+        </div>
+    </body>
+    </html>
+    """
+
+    return render_template_string(
+        html,
+        moisture={
+            "value": sync_status.get("last_moisture"),
+            "status": sync_status.get("last_moisture_status"),
+            "timestamp": sync_status.get("last_moisture_time"),
+        },
+        rag={
+            "last_sync": sync_status.get("last_rag_sync"),
+            "entries": sync_status.get("rag_entries"),
+            "dimension": sync_status.get("rag_dim"),
+            "error": sync_status.get("rag_error"),
+        },
+        kb_texts=kb_texts if kb_texts else [],
+        query=query,
+        results=results
+    )
+
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -370,6 +578,7 @@ def chat():
         print("❌ Exception in /chat:", str(e))
         return jsonify({"error": str(e)}), 500
 
+
 # ---------------------------
 # START BACKGROUND THREADS
 # ---------------------------
@@ -379,6 +588,5 @@ threading.Thread(target=sync_rag_loop, daemon=True).start()
 # ---------------------------
 # RUN FLASK
 # ---------------------------
-if __name__ == "__main__":
+if _name_ == "_main_":
     app.run(host="0.0.0.0", port=5000, debug=True)
-
