@@ -1,12 +1,12 @@
 # Flask and CORS
 Flask==2.3.3
-Flask-Cors==1.10.3
+Flask-Cors==3.0.10
 
 # Firebase Admin
 firebase-admin==6.3.0
 
 # Google Cloud / Vertex AI
-vertexai==1.28.0
+vertexai==1.71.1
 google-auth==2.23.0
 google-auth-oauthlib==1.0.0
 google-auth-httplib2==0.1.0
@@ -25,4 +25,3 @@ requests==2.32.0
 
 # Optional helpers
 python-dotenv==1.0.0
-
