@@ -1,5 +1,5 @@
 # Flask and CORS
-Flask==2.3.6
+Flask==2.3.3
 Flask-Cors==3.1.1
 
 # Firebase Admin
@@ -25,3 +25,4 @@ requests==2.32.0
 
 # Optional helpers
 python-dotenv==1.0.0  # if you use environment variables
+
