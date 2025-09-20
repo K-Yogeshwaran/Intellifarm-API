@@ -18,7 +18,7 @@ faiss-cpu==1.12.0
 
 
 # ML / Data
-numpy==1.26.0
+numpy >=1.26.0
 scikit-learn==1.3.2
 joblib==1.3.2
 
@@ -27,5 +27,6 @@ requests==2.32.0
 
 # Optional helpers
 python-dotenv==1.0.0
+
 
 
