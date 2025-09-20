@@ -13,7 +13,8 @@ google-auth-httplib2==0.1.0
 google-api-python-client==2.94.0
 
 # FAISS
-faiss-cpu==1.7.4
+faiss-cpu==1.12.0
+
 
 
 # ML / Data
@@ -26,4 +27,5 @@ requests==2.32.0
 
 # Optional helpers
 python-dotenv==1.0.0
+
 
